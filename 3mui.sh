@@ -12,6 +12,7 @@ DATA_DIR="${BASE_DIR}/data"
 IMAGE_NAME="ghcr.io/kazeyukiro/3m-ui:latest"
 CONTAINER_DATA_DIR="/etc/x-ui" 
 DEFAULT_PORT="12053"
+FALLBACK_PORT="2053"
 
 check_root() {
     if [[ $EUID -ne 0 ]]; then
@@ -33,19 +34,15 @@ check_docker() {
 open_ports() {
     local port=$1
     echo -e "${YELLOW}正在尝试在系统防火墙中放行端口 ${port}...${PLAIN}"
-    
-    # 尝试 UFW
     if command -v ufw &> /dev/null; then
         ufw allow ${port}/tcp >/dev/null 2>&1
         ufw allow ${port}/udp >/dev/null 2>&1
     fi
-    # 尝试 firewalld
     if command -v firewall-cmd &> /dev/null; then
         firewall-cmd --zone=public --add-port=${port}/tcp --permanent >/dev/null 2>&1
         firewall-cmd --zone=public --add-port=${port}/udp --permanent >/dev/null 2>&1
         firewall-cmd --reload >/dev/null 2>&1
     fi
-    # 尝试 iptables
     if command -v iptables &> /dev/null; then
         iptables -I INPUT -p tcp --dport ${port} -j ACCEPT >/dev/null 2>&1
         iptables -I INPUT -p udp --dport ${port} -j ACCEPT >/dev/null 2>&1
@@ -54,6 +51,12 @@ open_ports() {
 }
 
 show_info() {
+    # 状态检测：如果容器不存在，直接拦截
+    if ! docker ps -a --format '{{.Names}}' | grep -Eq "^3m-ui$"; then
+        echo -e "${RED}未检测到 3m-ui 容器！面板未安装或已被卸载，无数据可显示。${PLAIN}"
+        return
+    fi
+
     LOCAL_IP=$(curl -s4m8 ip.sb || curl -s4m8 ipinfo.io/ip)
     
     echo -e ""
@@ -62,11 +65,11 @@ show_info() {
     echo -e "${GREEN}==================================================================${PLAIN}"
     echo -e " 📂 ${YELLOW}数据挂载路径 :${PLAIN} ${DATA_DIR}"
     echo -e " 🌐 ${YELLOW}面板访问地址 :${PLAIN} http://${LOCAL_IP}:${DEFAULT_PORT}"
+    echo -e " 备 ${YELLOW}用访问地址   :${PLAIN} http://${LOCAL_IP}:${FALLBACK_PORT} ${GREEN}(如果上面打不开，请尝试这个)${PLAIN}"
     echo -e " 👤 ${YELLOW}默认用户名   :${PLAIN} admin"
     echo -e " 🔑 ${YELLOW}默认密码     :${PLAIN} admin"
     echo -e "${GREEN}==================================================================${PLAIN}"
-    echo -e "${YELLOW}注意 :${PLAIN} 脚本已自动放行 Linux 系统内部防火墙。"
-    echo -e "       如果仍打不开，请务必前往【云服务器控制台(安全组)】放行 ${DEFAULT_PORT} 端口！"
+    echo -e "${YELLOW}排错指南 :${PLAIN} 如果两个地址都打不开，请务必前往【云服务器控制台(安全组)】放行端口！"
     echo -e ""
 }
 
@@ -93,18 +96,22 @@ install_panel() {
         ${IMAGE_NAME}
         
     if [ $? -eq 0 ]; then
-        # 放行备用端口和目标端口
-        open_ports 2053
+        open_ports ${FALLBACK_PORT}
         open_ports ${DEFAULT_PORT}
         
-        echo -e "${YELLOW}正在修改面板默认端口为 ${DEFAULT_PORT}...${PLAIN}"
+        echo -e "${YELLOW}正在尝试通过命令行修改面板端口为 ${DEFAULT_PORT}...${PLAIN}"
         sleep 3
-        # 尝试通过内部命令行工具修改端口（兼容主流面板分支持性）
-        docker exec 3m-ui x-ui setting -port ${DEFAULT_PORT} >/dev/null 2>&1
-        docker exec 3m-ui 3m-ui setting -port ${DEFAULT_PORT} >/dev/null 2>&1
+        
+        # 尝试修改端口，并输出结果，方便排错
+        echo -e "${YELLOW}执行原版 x-ui 命令:${PLAIN}"
+        docker exec 3m-ui x-ui setting -port ${DEFAULT_PORT} || echo -e "${RED}原版 x-ui 命令失效，尝试 3m-ui 命令...${PLAIN}"
+        
+        echo -e "${YELLOW}执行 3m-ui 命令:${PLAIN}"
+        docker exec 3m-ui 3m-ui setting -port ${DEFAULT_PORT} || echo -e "${RED}3m-ui 命令行修改也失效。面板可能仍运行在 ${FALLBACK_PORT} 端口！${PLAIN}"
+        
         docker restart 3m-ui >/dev/null 2>&1
         
-        echo -e "${GREEN}🎉 3m-ui 容器安装成功！${PLAIN}"
+        echo -e "${GREEN}🎉 3m-ui 容器安装流程结束！${PLAIN}"
         show_info
     else
         echo -e "${RED}启动容器失败，请执行 docker logs 3m-ui 检查报错。${PLAIN}"
@@ -147,6 +154,8 @@ uninstall_panel() {
         docker stop 3m-ui >/dev/null 2>&1
         docker rm 3m-ui >/dev/null 2>&1
         echo -e "${GREEN}✅ 容器进程已被终止并删除。${PLAIN}"
+    else
+        echo -e "${YELLOW}未检测到运行中的 3m-ui 容器。${PLAIN}"
     fi
     
     echo -e ""
@@ -166,11 +175,11 @@ show_menu() {
     while true; do
         clear
         echo -e "${GREEN}================================================${PLAIN}"
-        echo -e "${GREEN}      3m-ui Docker 一键管理脚本 (端口放行版)${PLAIN}"
+        echo -e "${GREEN}      3m-ui Docker 一键管理脚本 (修复状态检测版)${PLAIN}"
         echo -e "${GREEN}================================================${PLAIN}"
         echo -e "${YELLOW}1.${PLAIN} 安装 3m-ui 容器"
         echo -e "${YELLOW}2.${PLAIN} 更新 3m-ui 容器"
-        echo -e "${YELLOW}3.${PLAIN} 查看 3m-ui 面板信息 (地址/密码/挂载目录)"
+        echo -e "${YELLOW}3.${PLAIN} 查看 3m-ui 面板信息"
         echo -e "${YELLOW}4.${PLAIN} 卸载 3m-ui 容器"
         echo -e "${YELLOW}0.${PLAIN} 退出脚本"
         echo -e "${GREEN}================================================${PLAIN}"
